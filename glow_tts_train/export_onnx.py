@@ -18,10 +18,13 @@ OPSET_VERSION = 12
 def main():
     """Main entry point"""
     parser = argparse.ArgumentParser(prog="glow-tts-export-onnx")
-    parser.add_argument("checkpoint", help="Path to model checkpoint (.pth)")
-    parser.add_argument("output", help="Path to output directory")
+    parser.add_argument("checkpoint", type=Path, help="Path to model checkpoint (.pth)")
+    parser.add_argument("output", type=Path, help="Path to output directory")
     parser.add_argument(
-        "--config", action="append", help="Path to JSON configuration file(s)"
+        "--config",
+        action="append",
+        type=Path,
+        help="Path to JSON configuration file(s)",
     )
     parser.add_argument(
         "--debug", action="store_true", help="Print DEBUG messages to the console"
@@ -37,28 +40,19 @@ def main():
 
     # -------------------------------------------------------------------------
 
-    # Convert to paths
-    if args.config:
-        args.config = [Path(p) for p in args.config]
-
-    args.checkpoint = Path(args.checkpoint)
-    args.output = Path(args.output)
-
     # Load configuration
     config = TrainingConfig()
     if args.config:
-        _LOGGER.debug("Loading configuration(s) from %s", args.config)
+        _LOGGER.debug(f"Loading configuration(s) from {args.config}")
         config = TrainingConfig.load_and_merge(config, args.config)
 
     # Load checkpoint
-    _LOGGER.debug("Loading checkpoint from %s", args.checkpoint)
+    _LOGGER.debug(f"Loading checkpoint from {args.checkpoint}")
     checkpoint = load_checkpoint(args.checkpoint, config)
     model = checkpoint.model
 
     _LOGGER.info(
-        "Loaded checkpoint from %s (global step=%s)",
-        args.checkpoint,
-        checkpoint.global_step,
+        f"Loaded checkpoint from {args.checkpoint} (global step={checkpoint.global_step})"
     )
 
     # Inference only
@@ -117,7 +111,7 @@ def main():
         },
     )
 
-    _LOGGER.info("Exported model to %s", args.output)
+    _LOGGER.info(f"Exported model to {args.output}")
 
 
 # -----------------------------------------------------------------------------

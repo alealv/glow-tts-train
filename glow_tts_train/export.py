@@ -16,10 +16,13 @@ def main():
     torch.manual_seed(1234)
 
     parser = argparse.ArgumentParser(prog="glow-tts-train.export")
-    parser.add_argument("checkpoint", help="Path to model checkpoint (.pth)")
-    parser.add_argument("output", help="Path to output model (.pth)")
+    parser.add_argument("checkpoint", type=Path, help="Path to model checkpoint (.pth)")
+    parser.add_argument("output", type=Path, help="Path to output model (.pth)")
     parser.add_argument(
-        "--config", action="append", help="Path to JSON configuration file(s)"
+        "--config",
+        action="append",
+        type=Path,
+        help="Path to JSON configuration file(s)",
     )
 
     parser.add_argument(
@@ -36,13 +39,6 @@ def main():
 
     # -------------------------------------------------------------------------
 
-    # Convert to paths
-    if args.config:
-        args.config = [Path(p) for p in args.config]
-
-    args.checkpoint = Path(args.checkpoint)
-    args.output = Path(args.output)
-
     # Load configuration
     config = TrainingConfig()
     if args.config:
@@ -50,14 +46,12 @@ def main():
         config = TrainingConfig.load_and_merge(config, args.config)
 
     # Load checkpoint
-    _LOGGER.debug("Loading checkpoint from %s", args.checkpoint)
+    _LOGGER.debug(f"Loading checkpoint from {args.checkpoint}")
     checkpoint = load_checkpoint(args.checkpoint, config, use_cuda=False)
     model = checkpoint.model
 
     _LOGGER.info(
-        "Loaded checkpoint from %s (global step=%s)",
-        args.checkpoint,
-        checkpoint.global_step,
+        f"Loaded checkpoint from {args.checkpoint} (global step={checkpoint.global_step})"
     )
 
     # Create output directory
@@ -75,7 +69,7 @@ def main():
     jitted_model = torch.jit.script(model)
     torch.jit.save(jitted_model, str(args.output))
 
-    _LOGGER.info("Saved TorchScript model to %s", args.output)
+    _LOGGER.info(f"Saved TorchScript model to {args.output}")
 
 
 # -----------------------------------------------------------------------------
