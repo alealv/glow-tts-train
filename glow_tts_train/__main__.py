@@ -124,8 +124,8 @@ def main(args):
     ), f"Found {len(transcriptions)} speakers in dataset but {config.model.n_speakers} was set."
 
     _LOGGER.info(f"Gin: {config.model.gin_channels}")
-    assert (
-        config.model.n_speakers > 1 and config.model.gin_channels > 0
+    assert not (
+        config.model.n_speakers > 1 and config.model.gin_channels == 0
     ), "Multispeaker model must have gin_channels > 0"
 
     # Create data loader
