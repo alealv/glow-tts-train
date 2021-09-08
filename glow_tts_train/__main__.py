@@ -22,33 +22,38 @@ from .train import train
 _LOGGER = logging.getLogger("glow_tts_train")
 
 
-def main():
+def parser():
     """Main entry point"""
     parser = argparse.ArgumentParser(prog="glow-tts-train")
     parser.add_argument(
-        "--output", required=True, help="Directory to store model artifacts"
+        "--output", required=True, type=Path, help="Directory to store model artifacts"
     )
     parser.add_argument(
-        "--dataset",
+        "--transcriptions-dir",
         required=True,
-        nargs=3,
+        type=Path,
+        metavar="transcriptions_dir",
+        help="Phones transcriptions directory. The name of each file must be compose as: '<speaker_id>_<dataset_type>.csv'",
+    )
+    parser.add_argument(
+        "--mels-dirs",
+        required=True,
         action="append",
-        default=[],
-        metavar=("speaker_id", "phonemes_csv", "mels"),
-        help="Speaker id, phonemes CSV, and JSONL file with mel spectrograms or directory with .npy files (--mels-dir)",
+        # type=lambda paths: [Path(p) for p in paths.split(" ")],
+        type=Path,
+        metavar="mels_dirs",
+        help="Mels directorie(s)",
     )
     parser.add_argument(
-        "--mels-dir",
-        action="store_true",
-        help="mels argument is a directory with .npy files",
-    )
-    parser.add_argument(
-        "--config", action="append", help="Path to JSON configuration file(s)"
+        "--config",
+        action="append",
+        type=Path,
+        help="Path to JSON configuration file(s)",
     )
     parser.add_argument(
         "--batch-size", type=int, help="Batch size (default: use config)"
     )
-    parser.add_argument("--checkpoint", help="Path to restore checkpoint")
+    parser.add_argument("--checkpoint", type=Path, help="Path to restore checkpoint")
     parser.add_argument("--git-commit", help="Git commit to store in config")
     parser.add_argument(
         "--checkpoint-epochs",
@@ -67,16 +72,10 @@ def main():
     parser.add_argument(
         "--debug", action="store_true", help="Print DEBUG messages to the console"
     )
-    args = parser.parse_args()
+    return parser.parse_args()
 
-    if args.debug:
-        logging.basicConfig(level=logging.DEBUG)
-    else:
-        logging.basicConfig(level=logging.INFO)
 
-    _LOGGER.debug(args)
-
-    # -------------------------------------------------------------------------
+def main(args):
 
     assert torch.cuda.is_available(), "GPU is required for training"
 
@@ -88,19 +87,6 @@ def main():
         torch.distributed.init_process_group(backend="nccl", init_method="env://")
 
     # -------------------------------------------------------------------------
-
-    # Convert to paths
-    args.output = Path(args.output)
-    args.dataset = [
-        (int(dataset_idx), Path(phonemes_path), Path(mels_path))
-        for dataset_idx, phonemes_path, mels_path in args.dataset
-    ]
-
-    if args.config:
-        args.config = [Path(p) for p in args.config]
-
-    if args.checkpoint:
-        args.checkpoint = Path(args.checkpoint)
 
     # Load configuration
     config = TrainingConfig()
@@ -118,117 +104,39 @@ def main():
     _LOGGER.debug("Setting random seed to %s", config.seed)
     random.seed(config.seed)
 
-    # Set num_symbols
-    if config.model.num_symbols < 1:
-        config.model.num_symbols = max(max(p_ids) for p_ids in id_phonemes.values()) + 1
+    transcriptions = {}
+    for transcription in args.transcriptions_dir.iterdir():
+        if transcription.is_file():
+            # Extract Speaker ID (must be a number)
+            try:
+                speaker_id = int(transcription.stem.split("_")[0])
+            except ValueError as e:
+                _LOGGER.fatal(
+                    f"Phones transcription filename must start with Speaker ID and must be a number."
+                )
+                _LOGGER.debug(e)
+                sys.exit(1)
 
-    assert config.model.num_symbols > 0, "No symbols"
+            transcriptions[speaker_id] = transcription
 
-    num_speakers = config.model.n_speakers
-    if num_speakers > 1:
-        assert (
-            config.model.gin_channels > 0
-        ), "Multispeaker model must have gin_channels > 0"
+    assert config.model.n_speakers and config.model.n_speakers == len(
+        transcriptions
+    ), f"Found {len(transcriptions)} speakers in dataset but {config.model.n_speakers} was set."
 
+    _LOGGER.info(f"Gin: {config.model.gin_channels}")
     assert (
-        len(args.dataset) <= num_speakers
-    ), "More datasets than speakers in model config"
-
-    if len(args.dataset) < num_speakers:
-        _LOGGER.warning(
-            "Model has %s speaker(s), but only %s dataset(s) were provided",
-            num_speakers,
-            len(args.dataset),
-        )
-
-    # Load mels
-    all_id_phonemes = {}
-    all_id_mels = {}
-    mel_dirs = {}
-
-    for dataset_idx, phonemes_path, mels_path in args.dataset:
-        # Load phonemes
-        _LOGGER.debug(
-            "Loading phonemes from %s (speaker=%s)", phonemes_path, dataset_idx
-        )
-
-        with open(phonemes_path, "r") as phonemes_file:
-            id_phonemes = load_phonemes(phonemes_file, config)
-
-        _LOGGER.info(
-            "Loaded phonemes for %s utterances (speaker=%s)",
-            len(id_phonemes),
-            dataset_idx,
-        )
-
-        # Load mels
-        id_mels = {}
-        if args.mels_dir:
-            _LOGGER.debug("Verifying mels in %s (speaker=%s)", mels_path, dataset_idx)
-            missing_ids = set()
-            for utt_id in id_phonemes:
-                mel_path = mels_path / (utt_id + ".npy")
-                if not mel_path.is_file():
-                    missing_ids.add(utt_id)
-
-            if missing_ids:
-                if args.skip_missing_mels:
-                    # Remove missing ids
-                    for missing_id in missing_ids:
-                        id_phonemes.pop(missing_id, None)
-
-                    _LOGGER.warning(
-                        "Missing %s/%s .npy file(s) for utterances (speaker=%s)",
-                        len(missing_ids),
-                        len(id_phonemes) + len(missing_ids),
-                        dataset_idx,
-                    )
-                else:
-                    _LOGGER.fatal(
-                        "Missing .npy files for utterances: %s (speaker=%s)",
-                        sorted(list(missing_ids)),
-                        dataset_idx,
-                    )
-                    sys.exit(1)
-
-            _LOGGER.info(
-                "Verified %s mel(s) in %s (speaker=%s)",
-                len(id_phonemes),
-                mels_path,
-                dataset_idx,
-            )
-            mel_dirs[dataset_idx] = mels_path
-        else:
-            # TODO: Verify audio configuration
-            _LOGGER.debug(
-                "Loading JSONL mels from %s (speaker=%s)", mels_path, dataset_idx
-            )
-
-            with open(mels_path, "r") as mels_file:
-                id_mels = load_mels(mels_file)
-
-            _LOGGER.info(
-                "Loaded mels for %s utterances (speaker=%s)", len(id_mels), dataset_idx
-            )
-
-        # Merge with main set.
-        # Disambiguate utterance ids using dataset index (speaker id).
-        for utt_id in id_phonemes:
-            all_id_phonemes[(dataset_idx, utt_id)] = id_phonemes[utt_id]
-
-        for utt_id in id_mels:
-            all_id_mels[(dataset_idx, utt_id)] = id_mels[utt_id]
+        config.model.n_speakers > 1 and config.model.gin_channels > 0
+    ), "Multispeaker model must have gin_channels > 0"
 
     # Create data loader
     dataset = PhonemeMelLoader(
-        id_phonemes=all_id_phonemes,
-        id_mels=all_id_mels,
-        mel_dirs=mel_dirs,
-        multispeaker=(num_speakers > 1),
+        transcriptions_by_speaker=transcriptions,
+        mels_dirs=args.mels_dirs,
+        config=config,
     )
     collate_fn = PhonemeMelCollate(
         n_frames_per_step=config.model.n_frames_per_step,
-        multispeaker=(num_speakers > 1),
+        multispeaker=len(transcriptions) > 1,
     )
 
     batch_size = config.batch_size if args.batch_size is None else args.batch_size
@@ -292,4 +200,13 @@ def main():
 # -----------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    main()
+    args = parser()
+
+    if args.debug:
+        logging.basicConfig(level=logging.DEBUG)
+    else:
+        logging.basicConfig(level=logging.INFO)
+
+    _LOGGER.debug(args)
+
+    main(args)

@@ -1,10 +1,12 @@
 """Classes and methods for loading phonemes and mel spectrograms"""
+import sys
 import csv
 import json
 import logging
 import random
 import typing
 from pathlib import Path
+from functools import reduce
 
 import numpy as np
 import torch
@@ -20,53 +22,105 @@ _LOGGER = logging.getLogger("glow_tts_train.dataset")
 class PhonemeMelLoader(torch.utils.data.Dataset):
     def __init__(
         self,
-        id_phonemes: typing.Dict[typing.Tuple[int, str], torch.IntTensor],
-        id_mels: typing.Dict[typing.Tuple[int, str], torch.FloatTensor],
-        mel_dirs: typing.Optional[typing.Dict[int, Path]] = None,
-        multispeaker: bool = False,
+        transcriptions_by_speaker: typing.Dict[int, Path],
+        mels_dirs: typing.Iterable[Path],
+        config: TrainingConfig,
     ):
-        self.id_phonemes = id_phonemes
-        self.id_mels = id_mels
-        self.mel_dirs = mel_dirs
-        self.multispeaker = multispeaker
+        self.multispeaker = len(transcriptions_by_speaker) > 1
 
-        if self.id_mels:
-            self.ids = list(
-                set.intersection(set(id_phonemes.keys()), set(id_mels.keys()))
+        self.dataset = []
+        for speaker_id, transcription in transcriptions_by_speaker.items():
+            # Load phonemes
+            _LOGGER.debug(
+                "Loading transcription from %s (speaker=%s)", transcription, speaker_id
             )
-            assert self.ids, "No shared utterance ids between phonemes and mels"
-        else:
-            # Assume all ids will be present in mels_dir
-            self.ids = list(id_phonemes.keys())
 
-        random.shuffle(self.ids)
+            with open(transcription, "r") as phonemes_file:
+                transcriptions_dict = load_phonemes(phonemes_file, config)
+
+            _LOGGER.info(
+                f"Loaded phonemes for {len(transcriptions_dict)} utterances (speaker={speaker_id})"
+            )
+
+            # Extract mels files
+            mel_files = {}
+            _LOGGER.debug("Verifying mels file for speaker: %s", speaker_id)
+            missing_ids = set()
+            for utt_id in transcriptions_dict:
+                for dir in mels_dirs:
+                    mel_path = dir / (utt_id + ".npy")
+                    if mel_path.is_file():
+                        mel_files[utt_id] = mel_path
+                if utt_id not in mel_files.keys():
+                    missing_ids.add(utt_id)
+
+            if missing_ids:
+                _LOGGER.warning(
+                    f"Missing {len(missing_ids)} .npy file(s) out of {len(transcriptions_dict) + len(missing_ids)} for utterances (speaker={speaker_id})"
+                )
+
+            intersection = set.intersection(
+                set(transcriptions_dict.keys()), set(mel_files.keys())
+            )
+            _LOGGER.info(
+                f"Using {len(intersection)} mel/utterance(s) for speaker: {speaker_id}"
+            )
+
+            # Merge with main set.
+            # Disambiguate utterance ids using dataset index (speaker id).
+            for utt_id in intersection:
+                self.dataset.append(
+                    {
+                        "speaker_id": speaker_id,
+                        "utt_id": utt_id,
+                        "phonemes": transcriptions_dict[utt_id],
+                        "mel_filename": mel_files[utt_id],
+                        "mel": None,
+                    }
+                )
+
+        # Set num_symbols
+        num_symbols = len(
+            reduce(
+                lambda x, y: x.union(set(y["phonemes"].tolist())),
+                self.dataset,
+                set(),
+            )
+        )
+        if config.model.num_symbols < 1:
+            config.model.num_symbols = num_symbols
+        elif config.model.num_symbols > num_symbols:
+            _LOGGER.warning(
+                f"Parsed {num_symbols} amount of symbols but {config.model.num_symbols} was set."
+            )
+        elif config.model.num_symbols < num_symbols:
+            _LOGGER.error(
+                f"ABORTING! Parsed {num_symbols} amount of symbols but {config.model.num_symbols} was set."
+            )
+            sys.exit(1)
 
     def __getitem__(self, index):
-        utt_key = self.ids[index]
-        speaker_idx, utt_id = utt_key
-        text = self.id_phonemes[utt_key]
-        mel = self.id_mels.get(utt_key)
+        phonems_seq = self.dataset[index]["phonemes"]
 
-        if mel is None:
-            mels_dir = self.mel_dirs.get(speaker_idx)
-            assert mels_dir, f"Missing mel for id {utt_id}, but no mels_dir"
-            mel_path = mels_dir / (utt_id + ".npy")
-
-            # TODO: Verify shape
-            mel = torch.from_numpy(np.load(mel_path, allow_pickle=True))
-
-            # Cache mel
-            self.id_mels[utt_key] = mel
+        if self.dataset[index]["mel"] is None:
+            self.dataset[index]["mel"] = torch.from_numpy(
+                np.load(self.dataset[index]["mel_filename"], allow_pickle=True)
+            )
 
         if self.multispeaker:
             # phonemes, mels, length, speaker
-            return (text, mel, len(text), speaker_idx)
+            return (
+                phonems_seq,
+                self.dataset[index]["mel"],
+                len(phonems_seq),
+                self.dataset[index]["speaker_id"],
+            )
 
         # phonemes, mels, length
-        return (text, mel, len(text))
+        return (phonems_seq, self.dataset[index]["mel"], len(phonems_seq))
 
     def __len__(self):
-        return len(self.ids)
+        return len(self.dataset)
 
 
 class PhonemeMelCollate:
