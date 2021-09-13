@@ -17,7 +17,7 @@ def main():
 
     parser = argparse.ArgumentParser(prog="glow-tts-train.export")
     parser.add_argument("checkpoint", type=Path, help="Path to model checkpoint (.pth)")
-    parser.add_argument("output", type=Path, help="Path to output model (.pth)")
+    parser.add_argument("output", type=Path, help="Output model filename (.pth)")
     parser.add_argument(
         "--config",
         action="append",
@@ -56,6 +56,7 @@ def main():
 
     # Create output directory
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    output = str(args.output) + ".pth"
 
     model.eval()
 
@@ -67,9 +68,9 @@ def main():
     model.forward = model.infer
 
     jitted_model = torch.jit.script(model)
-    torch.jit.save(jitted_model, str(args.output))
+    torch.jit.save(jitted_model, output)
 
-    _LOGGER.info(f"Saved TorchScript model to {args.output}")
+    _LOGGER.info(f"Saved TorchScript model to {output}")
 
 
 # -----------------------------------------------------------------------------

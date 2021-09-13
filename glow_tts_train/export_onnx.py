@@ -19,7 +19,7 @@ def main():
     """Main entry point"""
     parser = argparse.ArgumentParser(prog="glow-tts-export-onnx")
     parser.add_argument("checkpoint", type=Path, help="Path to model checkpoint (.pth)")
-    parser.add_argument("output", type=Path, help="Path to output directory")
+    parser.add_argument("output", type=Path, help="Output model filename (.onnx)")
     parser.add_argument(
         "--config",
         action="append",
@@ -80,11 +80,8 @@ def main():
     model.forward = infer_forward
 
     # Create output directory
-    args.output.mkdir(parents=True, exist_ok=True)
-
-    # Write config
-    with open(args.output / "config.json", "w") as config_file:
-        config.save(config_file)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    output = str(args.output) + ".onnx"
 
     # Create dummy input
     sequences = torch.randint(
@@ -99,7 +96,7 @@ def main():
     torch.onnx.export(
         model,
         dummy_input,
-        str(args.output / "generator.onnx"),
+        output,
         opset_version=OPSET_VERSION,
         do_constant_folding=True,
         input_names=["input", "input_lengths", "scales"],
@@ -111,7 +108,7 @@ def main():
         },
     )
 
-    _LOGGER.info(f"Exported model to {args.output}")
+    _LOGGER.info(f"Exported model to {output}")
 
 
 # -----------------------------------------------------------------------------
