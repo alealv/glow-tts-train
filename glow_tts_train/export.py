@@ -65,7 +65,7 @@ def main():
         model.decoder.store_inverse()
 
     # Inference only
-    model.forward = model.infer
+    # model.forward = model.infer
 
     jitted_model = torch.jit.script(model)
     torch.jit.save(jitted_model, output)

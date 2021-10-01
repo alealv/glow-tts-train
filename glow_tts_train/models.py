@@ -1,15 +1,17 @@
 import logging
 import math
-import typing
+from typing import Optional, Tuple
 
 import torch
 from torch import nn
 from torch.nn import functional as F
+from torch import Tensor
+from torch.nn import LayerNorm
 
 from . import monotonic_align
 from .attentions import CouplingBlock, Encoder
 from .config import TrainingConfig
-from .layers import ActNorm, ConvReluNorm, InvConvNear, LayerNorm
+from .layers import ActNorm, ConvReluNorm, InvConvNear
 from .optimize import OptimizerType
 from .utils import generate_path, sequence_mask, squeeze, unsqueeze
 
@@ -19,7 +21,13 @@ _LOGGER = logging.getLogger("test")
 
 
 class DurationPredictor(nn.Module):
-    def __init__(self, in_channels, filter_channels, kernel_size, p_dropout):
+    def __init__(
+        self,
+        in_channels: int,
+        filter_channels: int,
+        kernel_size: int,
+        p_dropout: float,
+    ):
         super().__init__()
 
         self.in_channels = in_channels
@@ -31,21 +39,29 @@ class DurationPredictor(nn.Module):
         self.conv_1 = nn.Conv1d(
             in_channels, filter_channels, kernel_size, padding=kernel_size // 2
         )
-        self.norm_1 = LayerNorm(filter_channels)
+        self.norm_1 = LayerNorm(filter_channels, eps=1e-4, elementwise_affine=False)
         self.conv_2 = nn.Conv1d(
             filter_channels, filter_channels, kernel_size, padding=kernel_size // 2
         )
-        self.norm_2 = LayerNorm(filter_channels)
+        self.norm_2 = LayerNorm(filter_channels, eps=1e-4, elementwise_affine=False)
         self.proj = nn.Conv1d(filter_channels, 1, 1)
 
-    def forward(self, x, x_mask):
+    def forward(self, x: Tensor, x_mask: Tensor):
         x = self.conv_1(x * x_mask)
         x = torch.relu(x)
+
+        x = torch.swapaxes(x, 1, 2)
         x = self.norm_1(x)
+        x = torch.swapaxes(x, 2, 1)
+
         x = self.drop(x)
         x = self.conv_2(x * x_mask)
         x = torch.relu(x)
+
+        x = torch.swapaxes(x, 1, 2)
         x = self.norm_2(x)
+        x = torch.swapaxes(x, 2, 1)
+
         x = self.drop(x)
         x = self.proj(x * x_mask)
         return x * x_mask
@@ -54,19 +70,19 @@ class DurationPredictor(nn.Module):
 class TextEncoder(nn.Module):
     def __init__(
         self,
-        n_vocab,
-        out_channels,
-        hidden_channels,
-        filter_channels,
-        filter_channels_dp,
-        n_heads,
-        n_layers,
-        kernel_size,
-        p_dropout,
-        window_size=None,
-        block_length=None,
-        mean_only=False,
-        prenet=False,
+        n_vocab: int,
+        out_channels: int,
+        hidden_channels: int,
+        filter_channels: int,
+        filter_channels_dp: int,
+        n_heads: int,
+        n_layers: int,
+        kernel_size: int,
+        p_dropout: float,
+        window_size: Optional[int] = None,
+        block_length: Optional[int] = None,
+        mean_only: bool = False,
+        prenet: bool = False,
         gin_channels=0,
     ):
 
@@ -83,7 +99,6 @@ class TextEncoder(nn.Module):
         self.p_dropout = p_dropout
         self.window_size = window_size
         self.block_length = block_length
-        self.mean_only = mean_only
         self.prenet = prenet
         self.gin_channels = gin_channels
 
@@ -111,13 +126,12 @@ class TextEncoder(nn.Module):
         )
 
         self.proj_m = nn.Conv1d(hidden_channels, out_channels, 1)
-        if not mean_only:
-            self.proj_s = nn.Conv1d(hidden_channels, out_channels, 1)
+        self.proj_s = nn.Conv1d(hidden_channels, out_channels, 1) if not mean_only else None
         self.proj_w = DurationPredictor(
             hidden_channels + gin_channels, filter_channels_dp, kernel_size, p_dropout
         )
 
-    def forward(self, x, x_lengths, g=None):
+    def forward(self, x: Tensor, x_lengths: Tensor, g: Optional[Tensor] = None):
         x = self.emb(x) * math.sqrt(self.hidden_channels)  # [b, t, h]
         x = torch.transpose(x, 1, -1)  # [b, h, t]
         x_mask = torch.unsqueeze(sequence_mask(x_lengths, x.size(2)), 1).to(x.dtype)
@@ -133,7 +147,7 @@ class TextEncoder(nn.Module):
             x_dp = torch.detach(x)
 
         x_m = self.proj_m(x) * x_mask
-        if not self.mean_only:
+        if self.proj_s is not None:
             x_logs = self.proj_s(x) * x_mask
         else:
             x_logs = torch.zeros_like(x_m)
@@ -145,17 +159,17 @@ class TextEncoder(nn.Module):
 class FlowSpecDecoder(nn.Module):
     def __init__(
         self,
-        in_channels,
-        hidden_channels,
-        kernel_size,
-        dilation_rate,
-        n_blocks,
-        n_layers,
-        p_dropout=0.0,
-        n_split=4,
-        n_sqz=2,
-        sigmoid_scale=False,
-        gin_channels=0,
+        in_channels: int,
+        hidden_channels: int,
+        kernel_size: int,
+        dilation_rate: int,
+        n_blocks: int,
+        n_layers: int,
+        p_dropout: float = 0.0,
+        n_split: int = 4,
+        n_sqz: int = 2,
+        sigmoid_scale: bool = False,
+        gin_channels: int = 0,
     ):
         super().__init__()
 
@@ -190,26 +204,33 @@ class FlowSpecDecoder(nn.Module):
                 )
             )
 
-    def forward(self, x, x_mask, g=None, reverse=False):
-        if not reverse:
-            flows = self.flows
-            logdet_tot = 0
-        else:
-            flows = reversed(self.flows)
-            logdet_tot = None
-
+    def forward(
+        self,
+        x: Tensor,
+        x_mask: Tensor,
+        g: Optional[Tensor] = None,
+        reverse: bool = False,
+    ):
         if self.n_sqz > 1:
             x, x_mask = squeeze(x, x_mask, self.n_sqz)
-        for f in flows:
-            if not reverse:
-                x, logdet = f(x, x_mask, g=g, reverse=reverse)
-                logdet_tot += logdet
-            else:
-                x, logdet = f(x, x_mask, g=g, reverse=reverse)
+
+        if not reverse:
+            logdet_tot = torch.zeros(x.shape[0]).type_as(x)
+            for f in self.flows:
+                x, logdet = f.forward(x, x_mask, g=g, reverse=reverse)
+                if logdet is not None and logdet_tot is not None:
+                    logdet_tot += logdet
+        else:
+            logdet_tot = None
+            for f in self.flows[::-1]:
+                x, logdet = f.forward(x, x_mask, g=g, reverse=reverse)
+
         if self.n_sqz > 1:
             x, x_mask = unsqueeze(x, x_mask, self.n_sqz)
+
         return x, logdet_tot
 
+    @torch.jit.unused
     def store_inverse(self):
         for f in self.flows:
             f.store_inverse()
@@ -237,11 +258,11 @@ class FlowGenerator(nn.Module):
         n_split: int = 4,
         n_sqz: int = 1,
         sigmoid_scale: bool = False,
-        window_size: typing.Optional[int] = None,
-        block_length: typing.Optional[int] = None,
+        window_size: Optional[int] = None,
+        block_length: Optional[int] = None,
         mean_only: bool = False,
-        hidden_channels_enc: typing.Optional[int] = None,
-        hidden_channels_dec: typing.Optional[int] = None,
+        hidden_channels_enc: Optional[int] = None,
+        hidden_channels_dec: Optional[int] = None,
         prenet: bool = False,
     ):
 
@@ -306,6 +327,8 @@ class FlowGenerator(nn.Module):
         if n_speakers > 1:
             self.emb_g = nn.Embedding(n_speakers, gin_channels)
             nn.init.uniform_(self.emb_g.weight, -0.1, 0.1)
+        else:
+            self.emb_g = None
 
     def forward(
         self,
@@ -318,11 +341,12 @@ class FlowGenerator(nn.Module):
         noise_scale=1.0,
         length_scale=1.0,
     ):
-        if g is not None:
+        if g is not None and self.emb_g is not None:
             g = F.normalize(self.emb_g(g)).unsqueeze(-1)  # [b, h]
 
         x_m, x_logs, logw, x_mask = self.encoder(x, x_lengths, g=g)
 
+        w_ceil = torch.tensor([])
         if gen:
             w = torch.exp(logw) * x_mask * length_scale
             w_ceil = torch.ceil(w)
@@ -375,11 +399,19 @@ class FlowGenerator(nn.Module):
             )  # [b, t, 1]
             logp = logp1 + logp2 + logp3 + logp4  # [b, t, t']
 
-            attn = (
-                monotonic_align.maximum_path(logp, attn_mask.squeeze(1))
-                .unsqueeze(1)
-                .detach()
-            )
+            if torch.jit.is_scripting():
+                attn = (
+                    monotonic_align.ts_maximum_path(logp, attn_mask.squeeze(1))
+                    .unsqueeze(1)
+                    .detach()
+                )
+            else:
+                attn = (
+                    monotonic_align.maximum_path(logp, attn_mask.squeeze(1))
+                    .unsqueeze(1)
+                    .detach()
+                )
+
         z_m = torch.matmul(
             attn.squeeze(1).transpose(1, 2), x_m.transpose(1, 2)
         ).transpose(
@@ -398,7 +430,7 @@ class FlowGenerator(nn.Module):
             (attn, logw, logw_),
         )
 
-    def preprocess(self, y, y_lengths, y_max_length):
+    def preprocess(self, y: Tensor, y_lengths: Tensor, y_max_length: Optional[int]):
         if y_max_length is not None:
             y_max_length = (y_max_length // self.n_sqz) * self.n_sqz
             y = y[:, :, :y_max_length]
@@ -416,13 +448,13 @@ ModelType = FlowGenerator
 
 def setup_model(
     config: TrainingConfig,
-    model: typing.Optional[ModelType] = None,
-    optimizer: typing.Optional[OptimizerType] = None,
+    model: Optional[ModelType] = None,
+    optimizer: Optional[OptimizerType] = None,
     model_factory=ModelType,
     optimizer_factory=OptimizerType,
     create_optimizer: bool = True,
     use_cuda: bool = True,
-) -> typing.Tuple[ModelType, typing.Optional[OptimizerType]]:
+) -> Tuple[ModelType, Optional[OptimizerType]]:
     if model is None:
         # Create new generator
         model = model_factory(

@@ -2,7 +2,9 @@ import math
 
 import numpy as np
 import torch
+from torch import Tensor
 from torch.nn import functional as F
+from typing import List, Optional
 
 
 def intersperse(lst, item):
@@ -38,10 +40,12 @@ def fused_add_tanh_sigmoid_multiply(input_a, input_b, n_channels):
     return acts
 
 
-def convert_pad_shape(pad_shape):
-    last = pad_shape[::-1]
-    pad_shape = [item for sublist in last for item in sublist]
-    return pad_shape
+def convert_pad_shape(pad_shape: List[List[int]]) -> List[int]:
+    new_pad_shape: List[int] = list()
+    for sublist in pad_shape[::-1]:
+        for item in sublist:
+            new_pad_shape.append(item)
+    return new_pad_shape
 
 
 def shift_1d(x):
@@ -49,7 +53,7 @@ def shift_1d(x):
     return x
 
 
-def sequence_mask(length, max_length=None):
+def sequence_mask(length: Tensor, max_length: Optional[int] = None):
     if max_length is None:
         max_length = length.max()
     x = torch.arange(max_length, dtype=length.dtype, device=length.device)
@@ -57,10 +61,10 @@ def sequence_mask(length, max_length=None):
 
 
 def maximum_path(value, mask, max_neg_val=-np.inf):
-    """ Numpy-friendly version. It's about 4 times faster than torch version.
-  value: [b, t_x, t_y]
-  mask: [b, t_x, t_y]
-  """
+    """Numpy-friendly version. It's about 4 times faster than torch version.
+    value: [b, t_x, t_y]
+    mask: [b, t_x, t_y]
+    """
     value = value * mask
 
     device = value.device
@@ -98,9 +102,9 @@ def maximum_path(value, mask, max_neg_val=-np.inf):
 
 def generate_path(duration, mask):
     """
-  duration: [b, t_x]
-  mask: [b, t_x, t_y]
-  """
+    duration: [b, t_x]
+    mask: [b, t_x, t_y]
+    """
     device = duration.device
 
     b, t_x, t_y = mask.shape
@@ -132,7 +136,7 @@ def clip_grad_value_(parameters, clip_value, norm_type=2):
     return total_norm
 
 
-def squeeze(x, x_mask=None, n_sqz=2):
+def squeeze(x: Tensor, x_mask: Optional[Tensor] = None, n_sqz: int = 2):
     b, c, t = x.size()
 
     t = (t // n_sqz) * n_sqz
@@ -147,7 +151,7 @@ def squeeze(x, x_mask=None, n_sqz=2):
     return x_sqz * x_mask, x_mask
 
 
-def unsqueeze(x, x_mask=None, n_sqz=2):
+def unsqueeze(x: Tensor, x_mask: Optional[Tensor] = None, n_sqz: int = 2):
     b, c, t = x.size()
 
     x_unsqz = x.view(b, n_sqz, c // n_sqz, t)
