@@ -78,7 +78,7 @@ class TrainingConfig(DataClassJsonMixin):
     audio: AudioConfig = field(default_factory=AudioConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     version: int = 1
-    git_commit: str = ""
+    git_commit: typing.Optional[str] = None
 
     def save(self, config_file: typing.TextIO):
         """Save config as JSON to a file"""

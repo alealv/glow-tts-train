@@ -54,7 +54,7 @@ def parser():
         "--batch-size", type=int, help="Batch size (default: use config)"
     )
     parser.add_argument("--checkpoint", type=Path, help="Path to restore checkpoint")
-    parser.add_argument("--git-commit", help="Git commit to store in config")
+    parser.add_argument("--git-commit", default="", help="Git commit to store in config")
     parser.add_argument(
         "--checkpoint-epochs",
         type=int,
